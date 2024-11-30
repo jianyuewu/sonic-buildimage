@@ -451,6 +451,7 @@ sudo cp files/image_config/logrotate/logrotateOverride.conf $FILESYSTEM_ROOT/etc
 ## Remove sshd host keys, and will regenerate on first sshd start
 sudo rm -f $FILESYSTEM_ROOT/etc/ssh/ssh_host_*_key*
 sudo cp files/sshd/host-ssh-keygen.sh $FILESYSTEM_ROOT/usr/local/bin/
+sudo cp files/scripts/rsyslog_debug.sh $FILESYSTEM_ROOT/usr/local/bin/
 sudo mkdir $FILESYSTEM_ROOT/etc/systemd/system/ssh.service.d
 sudo cp files/sshd/override.conf $FILESYSTEM_ROOT/etc/systemd/system/ssh.service.d/override.conf
 # Config sshd
@@ -489,6 +490,7 @@ sudo augtool -r $FILESYSTEM_ROOT --autosave "
 rm /files/lib/systemd/system/rsyslog.service/Service/ExecStart/arguments
 set /files/lib/systemd/system/rsyslog.service/Service/ExecStart/arguments/1 -n
 "
+sudo sed -i -e 's|ExecStart=/usr/sbin/rsyslogd -n|ExecStart=/usr/sbin/rsyslogd -dn|' -e 's|StandardOutput=null|StandardOutput=file:/tmp/rsyslog_debug.log\nStandardError=inherit|' $FILESYSTEM_ROOT/lib/systemd/system/rsyslog.service
 
 sudo mkdir -p $FILESYSTEM_ROOT/var/core
 
