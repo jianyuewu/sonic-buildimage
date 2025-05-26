@@ -288,6 +288,9 @@
 {% if (generate_tc_to_dscp_map is defined) and tunnel_qos_remap_enable %}
     {{- generate_tc_to_dscp_map() }}
 {% endif %}
+{% if (generate_switch_trimming is defined) and switch_trimming_enable %}
+    {{- generate_switch_trimming() }}
+{% endif %}
 {% if (generate_scheduler_config is defined) %}
     {{- generate_scheduler_config() }}
 {% else %}
