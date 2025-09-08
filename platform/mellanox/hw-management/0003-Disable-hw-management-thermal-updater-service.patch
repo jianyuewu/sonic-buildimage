@@ -1,0 +1,55 @@
+From 0fcba9021886e2324252b4d5adb8ed6dd188a4e4 Mon Sep 17 00:00:00 2001
+From: Jianyue Wu <jianyuew@nvidia.com>
+Date: Mon, 24 Nov 2025 20:56:23 +0800
+Subject: [PATCH 3/3] Disable hw-management-thermal-updater service
+
+SONiC will do thermal update, so disable hw-managment side thermal
+updater service.
+
+Signed-off-by: Jianyue Wu <jianyuew@nvidia.com>
+---
+ debian/rules | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/debian/rules b/debian/rules
+index a8b29292..55b50256 100755
+--- a/debian/rules
++++ b/debian/rules
+@@ -48,12 +48,15 @@ endif
+ 	cp -a usr/etc/hw-management-virtual/* debian/$(pname)/etc/hw-management-virtual
+ 	dh_installdirs -p$(pname) etc/hw-management-fast-sysfs-monitor
+ 	cp -a usr/etc/hw-management-fast-sysfs-monitor/* debian/$(pname)/etc/hw-management-fast-sysfs-monitor
++	# Mask hw-management-thermal-updater.service
++	dh_installdirs -p$(pname) lib/systemd/system
++	ln -sf /dev/null debian/$(pname)/lib/systemd/system/hw-management-thermal-updater.service
+ 
+ override_dh_installinit:
+ 	dh_installinit --name=hw-management
+ 	dh_installinit --name=hw-management-tc
+ 	dh_installinit --name=hw-management-peripheral-updater
+-	dh_installinit --name=hw-management-thermal-updater
++	# dh_installinit --name=hw-management-thermal-updater
+ 	dh_installinit --name=hw-management-sysfs-monitor
+ 	dh_installinit --name=hw-management-fast-sysfs-monitor
+ 	dh_installinit --name=hw-management-sync
+@@ -62,7 +65,7 @@ override_dh_systemd_enable:
+ 	dh_systemd_enable --name=hw-management
+ 	dh_systemd_enable --name=hw-management-tc
+ 	dh_systemd_enable --name=hw-management-peripheral-updater
+-	dh_systemd_enable --name=hw-management-thermal-updater
++	# dh_systemd_enable --name=hw-management-thermal-updater
+ 	dh_systemd_enable --name=hw-management-sysfs-monitor
+ 	dh_systemd_enable --name=hw-management-fast-sysfs-monitor
+ 	dh_systemd_enable --no-enable --name=hw-management-sync 
+@@ -71,7 +74,7 @@ override_dh_systemd_start:
+ 	dh_systemd_start --name=hw-management
+ 	dh_systemd_start --name=hw-management-tc
+ 	dh_systemd_start --name=hw-management-peripheral-updater
+-	dh_systemd_start --name=hw-management-thermal-updater
++	# dh_systemd_start --name=hw-management-thermal-updater
+ 	dh_systemd_start --name=hw-management-sysfs-monitor
+ 	dh_systemd_start --name=hw-management-fast-sysfs-monitor
+ 
+-- 
+2.49.0
+
