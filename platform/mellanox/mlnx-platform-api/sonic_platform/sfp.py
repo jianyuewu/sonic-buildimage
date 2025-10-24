@@ -925,6 +925,7 @@ class SFP(NvidiaSFPCommon):
 
     def get_vendor_info(self):
         """Get SFP vendor info (manufacturer and part number).
+        This function reads both fields in one EEPROM transaction via xcvr API.
         Uses cache to avoid redundant EEPROM reads.
 
         Returns:
@@ -935,19 +936,21 @@ class SFP(NvidiaSFPCommon):
             if self.manufacturer is not None and self.part_number is not None:
                 return self.manufacturer, self.part_number
 
+            # Get the xcvr API
             api = self.get_xcvr_api()
             if api is None:
                 return None, None
 
-            manufacturer = api.get_manufacturer()
-            part_number = self.get_model()  # get_model has its own cache
+            # Call API's get_vendor_info which reads both fields in one transaction
+            manufacturer, part_number = api.get_vendor_info()
 
             # Cache the vendor info
-            if manufacturer is not None and part_number is not None:
+            if manufacturer and part_number:
                 self.manufacturer = manufacturer
                 self.part_number = part_number
+                return manufacturer, part_number
 
-            return manufacturer, part_number
+            return None, None
         except Exception:
             return None, None
 
