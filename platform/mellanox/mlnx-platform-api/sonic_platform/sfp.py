@@ -205,6 +205,15 @@ SFF_POWER_CLASS_8_OFFSET = 107
 CMIS_MCI_EEPROM_OFFSET = 2
 CMIS_MCI_MASK = 0b00001100
 
+# Vendor info EEPROM offsets
+CMIS_VENDOR_NAME_OFFSET = 129
+CMIS_VENDOR_PN_OFFSET = 148
+SFF8636_VENDOR_NAME_OFFSET = 148
+SFF8636_VENDOR_PN_OFFSET = 168
+SFF8472_VENDOR_NAME_OFFSET = 20
+SFF8472_VENDOR_PN_OFFSET = 40
+VENDOR_INFO_FIELD_SIZE = 16
+
 STATE_DOWN = 'Down'                             # Initial state
 STATE_INIT = 'Initializing'                     # Module starts initializing, check module present, also power on the module if need
 STATE_RESETTING = 'Resetting'                   # Module is resetting the firmware
@@ -925,6 +934,7 @@ class SFP(NvidiaSFPCommon):
 
     def get_vendor_info(self):
         """Get SFP vendor info (manufacturer and part number).
+        This function reads both fields directly from EEPROM.
         Uses cache to avoid redundant EEPROM reads.
 
         Returns:
@@ -935,19 +945,38 @@ class SFP(NvidiaSFPCommon):
             if self.manufacturer is not None and self.part_number is not None:
                 return self.manufacturer, self.part_number
 
-            api = self.get_xcvr_api()
-            if api is None:
+            # Get module type
+            sfp_type = self._get_sfp_type_str(self.sdk_index)
+            if not sfp_type:
                 return None, None
 
-            manufacturer = api.get_manufacturer()
-            part_number = self.get_model()  # get_model has its own cache
+            # Define EEPROM offsets for different module types
+            if sfp_type == SFP_TYPE_CMIS:
+                vendor_name_offset = CMIS_VENDOR_NAME_OFFSET
+                vendor_pn_offset = CMIS_VENDOR_PN_OFFSET
+            elif sfp_type == SFP_TYPE_SFF8636:
+                vendor_name_offset = SFF8636_VENDOR_NAME_OFFSET
+                vendor_pn_offset = SFF8636_VENDOR_PN_OFFSET
+            elif sfp_type == SFP_TYPE_SFF8472:
+                vendor_name_offset = SFF8472_VENDOR_NAME_OFFSET
+                vendor_pn_offset = SFF8472_VENDOR_PN_OFFSET
+            else:
+                return None, None
+
+            # Read vendor name and part number
+            manufacturer = self.read_eeprom(vendor_name_offset, VENDOR_INFO_FIELD_SIZE)
+            part_number = self.read_eeprom(vendor_pn_offset, VENDOR_INFO_FIELD_SIZE)
+
+            if manufacturer is None or part_number is None:
+                return None, None
 
             # Cache the vendor info
-            if manufacturer is not None and part_number is not None:
+            if manufacturer and part_number:
                 self.manufacturer = manufacturer
                 self.part_number = part_number
+                return manufacturer, part_number
 
-            return manufacturer, part_number
+            return None, None
         except Exception:
             return None, None
 
