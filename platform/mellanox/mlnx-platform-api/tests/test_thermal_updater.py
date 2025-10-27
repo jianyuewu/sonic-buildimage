@@ -49,6 +49,8 @@ class TestThermalUpdater:
         hw_management_independent_mode_update.thermal_data_set_module.reset_mock()
         hw_management_independent_mode_update.thermal_data_clean_asic.reset_mock()
         hw_management_independent_mode_update.thermal_data_clean_module.reset_mock()
+        hw_management_independent_mode_update.vendor_data_set_module.reset_mock()
+        hw_management_independent_mode_update.vendor_data_clear_module.reset_mock()
 
     def test_init(self):
         """Test ThermalUpdater initialization"""
@@ -190,14 +192,37 @@ class TestThermalUpdater:
         mock_sfp.sdk_index = 10
         mock_sfp.get_presence = mock.MagicMock(return_value=True)
         mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+        # First call - serial changed, vendor info should be sent
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=('TestVendor', 'TEST123'))
 
         updater = ThermalUpdater([mock_sfp])
-        # First call - module not present initially
         updater.update_single_module(mock_sfp)
-        hw_management_independent_mode_update.reset_mock()
 
-        # Second call
+        # Verify reinit_if_sn_changed was called
+        mock_sfp.reinit_if_sn_changed.assert_called_once()
+        # Verify get_vendor_info was called when serial changed
+        mock_sfp.get_vendor_info.assert_called_once()
+        # Verify vendor_data_set_module was called on first plug-in
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'TestVendor', 'part_number': 'TEST123'}
+        )
+        # Verify thermal_data_set_module was also called
+        hw_management_independent_mode_update.thermal_data_set_module.assert_called_once_with(0, 11, 55000, 80000, 70000, 0)
+
+        hw_management_independent_mode_update.reset_mock()
+        mock_sfp.reinit_if_sn_changed.reset_mock()
+        mock_sfp.get_vendor_info.reset_mock()
+
+        # Second call - serial unchanged, no vendor info update
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=False)
         updater.update_single_module(mock_sfp)
+
+        # Verify reinit_if_sn_changed was called
+        mock_sfp.reinit_if_sn_changed.assert_called_once()
+        # Verify get_vendor_info was NOT called when serial unchanged
+        mock_sfp.get_vendor_info.assert_not_called()
+        hw_management_independent_mode_update.vendor_data_set_module.assert_not_called()
         hw_management_independent_mode_update.thermal_data_set_module.assert_called_once_with(0, 11, 55000, 80000, 70000, 0)
 
     def test_update_single_module_with_none_temperature(self):
@@ -222,6 +247,140 @@ class TestThermalUpdater:
         updater.update_single_module(mock_sfp)
 
         hw_management_independent_mode_update.thermal_data_set_module.assert_called_once_with(0, 11, 0, 0, 0, 254000)
+
+    def test_update_single_module_same_module_replug(self):
+        """Test same module unplug/replug scenario (same serial number)"""
+        mock_sfp = mock.MagicMock()
+        mock_sfp.sdk_index = 10
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+        # First plug-in: serial changed
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=('Innolight', 'TR-iQ13L-NVS'))
+
+        updater = ThermalUpdater([mock_sfp])
+
+        # First plug-in: vendor_data_set_module should be called
+        updater.update_single_module(mock_sfp)
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'Innolight', 'part_number': 'TR-iQ13L-NVS'}
+        )
+
+        # Simulate unplug
+        mock_sfp.get_presence = mock.MagicMock(return_value=False)
+        updater.update_single_module(mock_sfp)
+
+        # Replug same module (same serial number): vendor_data_set_module should NOT be called
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=False)  # Same serial
+        hw_management_independent_mode_update.reset_mock()
+        updater.update_single_module(mock_sfp)
+        hw_management_independent_mode_update.vendor_data_set_module.assert_not_called()
+
+    def test_update_single_module_different_module_replacement(self):
+        """Test different module replacement scenario (different serial number)"""
+        mock_sfp = mock.MagicMock()
+        mock_sfp.sdk_index = 10
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+
+        # First module: Innolight
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=('Innolight', 'TR-iQ13L-NVS'))
+
+        updater = ThermalUpdater([mock_sfp])
+        updater.update_single_module(mock_sfp)
+
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'Innolight', 'part_number': 'TR-iQ13L-NVS'}
+        )
+
+        # Simulate unplug
+        mock_sfp.get_presence = mock.MagicMock(return_value=False)
+        updater.update_single_module(mock_sfp)
+
+        # Plug different module: Mellanox with different serial
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)  # Different serial
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=('Mellanox', 'MCP1600-C003'))
+
+        hw_management_independent_mode_update.reset_mock()
+        updater.update_single_module(mock_sfp)
+
+        # New vendor info should be sent for different module (different serial)
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'Mellanox', 'part_number': 'MCP1600-C003'}
+        )
+
+    def test_update_single_module_same_model_different_serial(self):
+        """Test same model but different serial number (different physical module)"""
+        mock_sfp = mock.MagicMock()
+        mock_sfp.sdk_index = 10
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+
+        # First module: Innolight TR-iQ13L-NVS
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=('Innolight', 'TR-iQ13L-NVS'))
+
+        updater = ThermalUpdater([mock_sfp])
+        updater.update_single_module(mock_sfp)
+
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'Innolight', 'part_number': 'TR-iQ13L-NVS'}
+        )
+
+        # Simulate unplug
+        mock_sfp.get_presence = mock.MagicMock(return_value=False)
+        updater.update_single_module(mock_sfp)
+
+        # Plug same model but different serial
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)  # Different serial!
+
+        hw_management_independent_mode_update.reset_mock()
+        updater.update_single_module(mock_sfp)
+
+        # vendor_data_set_module SHOULD be called even though MFG+PN are the same
+        # because serial number is different (different physical module)
+        hw_management_independent_mode_update.vendor_data_set_module.assert_called_once_with(
+            0, 11, {'manufacturer': 'Innolight', 'part_number': 'TR-iQ13L-NVS'}
+        )
+
+    def test_update_single_module_vendor_info_read_failure(self):
+        """Test module update when vendor info read fails"""
+        mock_sfp = mock.MagicMock()
+        mock_sfp.sdk_index = 10
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+        # Serial unchanged (reinit_if_sn_changed returns False)
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=False)
+
+        updater = ThermalUpdater([mock_sfp])
+        updater.update_single_module(mock_sfp)
+
+        # vendor_data_set_module should not be called when serial unchanged
+        hw_management_independent_mode_update.vendor_data_set_module.assert_not_called()
+        # But thermal_data_set_module should still be called
+        hw_management_independent_mode_update.thermal_data_set_module.assert_called_once_with(0, 11, 55000, 80000, 70000, 0)
+
+    def test_update_single_module_manufacturer_read_failure(self):
+        """Test module update when manufacturer read fails"""
+        mock_sfp = mock.MagicMock()
+        mock_sfp.sdk_index = 10
+        mock_sfp.get_presence = mock.MagicMock(return_value=True)
+        mock_sfp.get_temperature_info = mock.MagicMock(return_value=(55.0, 70.0, 80.0))
+        # Serial changed but vendor info read fails
+        mock_sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        mock_sfp.get_vendor_info = mock.MagicMock(return_value=(None, 'TEST123'))  # Manufacturer read failure
+
+        updater = ThermalUpdater([mock_sfp])
+        updater.update_single_module(mock_sfp)
+
+        # vendor_data_set_module should not be called when manufacturer is None
+        hw_management_independent_mode_update.vendor_data_set_module.assert_not_called()
+        # And thermal_data_set_module should still be called
+        hw_management_independent_mode_update.thermal_data_set_module.assert_called_once_with(0, 11, 55000, 80000, 70000, 0)
 
     def test_load_tc_config_asic_no_poll_time_logging(self):
         """Test logging when ASIC parameter exists but has no poll_time"""

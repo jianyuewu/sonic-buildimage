@@ -37,6 +37,8 @@ except ImportError:
     hw_management_independent_mode_update.thermal_data_set_module = mock.MagicMock()
     hw_management_independent_mode_update.thermal_data_clean_asic = mock.MagicMock()
     hw_management_independent_mode_update.thermal_data_clean_module = mock.MagicMock()
+    hw_management_independent_mode_update.vendor_data_set_module = mock.MagicMock()
+    hw_management_independent_mode_update.vendor_data_clear_module = mock.MagicMock()
 
 
 SFP_TEMPERATURE_SCALE = 1000
@@ -192,6 +194,25 @@ class ThermalUpdater:
                 temperature = 0 if temperature is None else temperature * SFP_TEMPERATURE_SCALE
                 warning_thresh = 0 if warning_thresh is None else warning_thresh * SFP_TEMPERATURE_SCALE
                 critical_thresh = 0 if critical_thresh is None else critical_thresh * SFP_TEMPERATURE_SCALE
+
+                # Check if module changed (based on serial number)
+                sn_changed = sfp.reinit_if_sn_changed()
+
+                # Send vendor info only when a new/different module is detected
+                if sn_changed:
+                    manufacturer, part_number = sfp.get_vendor_info()
+                    if manufacturer and part_number:
+                        vendor_info = {
+                            'manufacturer': manufacturer,
+                            'part_number': part_number
+                        }
+                        hw_management_independent_mode_update.vendor_data_set_module(
+                            0,
+                            sfp.sdk_index + 1,
+                            vendor_info
+                        )
+                        logger.log_info(f'Module {sfp.sdk_index} vendor info updated - '
+                                      f'manufacturer: {manufacturer} part_number: {part_number}')
 
                 hw_management_independent_mode_update.thermal_data_set_module(
                     0, # ASIC index always 0 for now
