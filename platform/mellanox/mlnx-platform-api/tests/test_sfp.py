@@ -631,12 +631,22 @@ class TestSfp:
         sfp.temp_critical_threshold = 0.0
         assert sfp.get_temperature_info() == (58.0, 75.0, 85.0)
 
+        # Test when thresh_support is None → treat as not supported (0.0, 0.0) and decrement retry
+        sfp.temp_high_threshold = 0.0
+        sfp.temp_critical_threshold = 0.0
+        sfp.retry_read_threshold = 5
+        mock_api.get_transceiver_thresholds_support.return_value = None
+        temp, warn, crit = sfp.get_temperature_info()
+        assert (temp, warn, crit) == (58.0, 0.0, 0.0)
+        assert sfp.retry_read_threshold == 4
+
         # Test when thresh_support is False (returns 0.0, will trigger retry due to "not 0.0")
         sfp.temp_high_threshold = 0.0
         sfp.temp_critical_threshold = 0.0
         sfp.retry_read_threshold = 5
         mock_api.get_transceiver_thresholds_support.return_value = False
         assert sfp.get_temperature_info() == (58.0, 0.0, 0.0)
+        assert sfp.retry_read_threshold == 4
 
         # Reset cached thresholds and set thresholds support back to True
         sfp.temp_high_threshold = 0.0
@@ -729,3 +739,90 @@ class TestSfp:
         sfp.get_xcvr_api.return_value.xcvr_eeprom.read.return_value = '1234567891'
         assert sfp.reinit_if_sn_changed()
 
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_success_and_cache(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+
+        from sonic_platform_base.sonic_xcvr.fields import consts
+        def mock_read(field):
+            if field == consts.VENDOR_NAME_FIELD:
+                return 'Mellanox'
+            if field == consts.VENDOR_PART_NO_FIELD:
+                return 'PN-1234'
+            return None
+        mock_eeprom.read.side_effect = mock_read
+
+        # First call reads from eeprom
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer == 'Mellanox'
+        assert part_number == 'PN-1234'
+        assert mock_eeprom.read.call_count == 2
+
+        # Second call should return cached values without additional reads
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer == 'Mellanox'
+        assert part_number == 'PN-1234'
+        assert mock_eeprom.read.call_count == 2
+
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_retry_then_success(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+
+        from sonic_platform_base.sonic_xcvr.fields import consts
+        state = {'fail_reads': 2}
+        def flaky_read(field):
+            if state['fail_reads'] > 0:
+                state['fail_reads'] -= 1
+                raise Exception('EEPROM not ready')
+            if field == consts.VENDOR_NAME_FIELD:
+                return 'Mellanox'
+            if field == consts.VENDOR_PART_NO_FIELD:
+                return 'PN-5678'
+            return None
+        mock_eeprom.read.side_effect = flaky_read
+
+        # First call fails (counter decremented)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == (None, None)
+        # Second call fails (counter decremented)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == (None, None)
+        # Third call succeeds (reads both fields)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == ('Mellanox', 'PN-5678')
+        # Total read invocations: first two calls each raise on first field (2),
+        # third call reads both fields (2) → 4 total
+        assert mock_eeprom.read.call_count == 4
+
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_all_fail(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+        mock_eeprom.read.side_effect = Exception('EEPROM error')
+
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer is None
+        assert part_number is None
+
+    def test_get_vendor_info_no_api_or_missing_attr(self):
+        sfp = SFP(0)
+        # No API
+        sfp.get_xcvr_api = mock.MagicMock(return_value=None)
+        assert sfp.get_vendor_info() == (None, None)
+
+        # API without xcvr_eeprom attribute
+        class DummyApi(object):
+            pass
+        sfp.get_xcvr_api.return_value = DummyApi()
+        assert sfp.get_vendor_info() == (None, None)
