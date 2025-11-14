@@ -1,7 +1,7 @@
-From 2b5ad7fc6c39b9fa0f3f72341352fb121432ebb1 Mon Sep 17 00:00:00 2001
+From 231ac5d7ac18de2625c639ea610e75dc1b646a1a Mon Sep 17 00:00:00 2001
 From: Vivek Reddy <vkarri@nvidia.com>
 Date: Mon, 5 May 2025 21:25:57 +0000
-Subject: [PATCH] Remove unused non-upstream kernel modules from load
+Subject: [PATCH 2/3] Remove unused non-upstream kernel modules from load
 
 Signed-off-by: Vivek Reddy <vkarri@nvidia.com>
 ---
@@ -22,5 +22,5 @@ index c5a01a44..85e6c967 100644
  pmbus
  i2c-mux-mlxcpld
 -- 
-2.43.2
+2.43.0
 
