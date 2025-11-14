@@ -29,7 +29,7 @@ test_path = os.path.dirname(os.path.abspath(__file__))
 modules_path = os.path.dirname(test_path)
 sys.path.insert(0, modules_path)
 
-from sonic_platform.sfp import SFP, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED
+from sonic_platform.sfp import SFP, NvidiaSFPCommon, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED
 from sonic_platform.chassis import Chassis
 
 
@@ -246,8 +246,10 @@ class TestSfp:
 
     @mock.patch('sonic_platform.utils.read_int_from_file')
     @mock.patch('sonic_platform.sfp.SFP._read_eeprom')
-    def test_sfp_get_presence(self, mock_read, mock_read_int):
+    @mock.patch('sonic_platform.sfp.SFP.is_sw_control')
+    def test_sfp_get_presence(self, mock_is_sw_control, mock_read, mock_read_int):
         sfp = SFP(0)
+        mock_is_sw_control.return_value = False
 
         mock_read_int.return_value = 1
         mock_read.return_value = None
@@ -607,3 +609,91 @@ class TestSfp:
         assert sfp.get_temperature_info() == (True, 58.0, 75.0, 85.0)
         sfp.is_sw_control.side_effect = Exception('')
         assert sfp.get_temperature_info() == (False, None, None, None)
+
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_success_and_cache(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+
+        from sonic_platform_base.sonic_xcvr.fields import consts
+        def mock_read(field):
+            if field == consts.VENDOR_NAME_FIELD:
+                return 'Mellanox'
+            if field == consts.VENDOR_PART_NO_FIELD:
+                return 'PN-1234'
+            return None
+        mock_eeprom.read.side_effect = mock_read
+
+        # First call reads from eeprom
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer == 'Mellanox'
+        assert part_number == 'PN-1234'
+        assert mock_eeprom.read.call_count == 2
+
+        # Second call should return cached values without additional reads
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer == 'Mellanox'
+        assert part_number == 'PN-1234'
+        assert mock_eeprom.read.call_count == 2
+
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_retry_then_success(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+
+        from sonic_platform_base.sonic_xcvr.fields import consts
+        state = {'fail_reads': 2}
+        def flaky_read(field):
+            if state['fail_reads'] > 0:
+                state['fail_reads'] -= 1
+                raise Exception('EEPROM not ready')
+            if field == consts.VENDOR_NAME_FIELD:
+                return 'Mellanox'
+            if field == consts.VENDOR_PART_NO_FIELD:
+                return 'PN-5678'
+            return None
+        mock_eeprom.read.side_effect = flaky_read
+
+        # First call fails (counter decremented)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == (None, None)
+        # Second call fails (counter decremented)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == (None, None)
+        # Third call succeeds (reads both fields)
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert (manufacturer, part_number) == ('Mellanox', 'PN-5678')
+        # Total read invocations: first two calls each raise on first field (2),
+        # third call reads both fields (2) → 4 total
+        assert mock_eeprom.read.call_count == 4
+
+    @mock.patch('time.sleep', mock.MagicMock())
+    def test_get_vendor_info_all_fail(self):
+        sfp = SFP(0)
+        mock_api = mock.MagicMock()
+        mock_eeprom = mock.MagicMock()
+        mock_api.xcvr_eeprom = mock_eeprom
+        sfp.get_xcvr_api = mock.MagicMock(return_value=mock_api)
+        mock_eeprom.read.side_effect = Exception('EEPROM error')
+
+        manufacturer, part_number = sfp.get_vendor_info()
+        assert manufacturer is None
+        assert part_number is None
+
+    def test_get_vendor_info_no_api_or_missing_attr(self):
+        sfp = SFP(0)
+        # No API
+        sfp.get_xcvr_api = mock.MagicMock(return_value=None)
+        assert sfp.get_vendor_info() == (None, None)
+
+        # API without xcvr_eeprom attribute
+        class DummyApi(object):
+            pass
+        sfp.get_xcvr_api.return_value = DummyApi()
+        assert sfp.get_vendor_info() == (None, None)
