@@ -23,6 +23,7 @@ import sys
 import time
 import os
 import re
+import atexit
 
 sys.path.append('/run/hw-management/bin')
 
@@ -55,6 +56,7 @@ class ThermalUpdater:
         self._sfp_list = sfp_list
         self._sfp_status = {}
         self._timer = utils.Timer()
+        self._cleanup_registered = False
 
     def _find_matching_key(self, dev_parameters, pattern):
         """
@@ -138,7 +140,11 @@ class ThermalUpdater:
         self._timer.schedule(sfp_poll_interval, self.update_module)
 
     def start(self):
-        self.clean_thermal_data()
+        # Register cleanup handler once
+        if not self._cleanup_registered:
+            atexit.register(self.clean_thermal_data)
+            self._cleanup_registered = True
+
         self.control_tc(False)
         self.load_tc_config()
 
