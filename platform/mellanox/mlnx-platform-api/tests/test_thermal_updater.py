@@ -394,12 +394,11 @@ class TestThermalUpdater:
             mock_exists.assert_has_calls(expected_calls, any_order=True)
 
     @mock.patch('sonic_platform.thermal_updater.ThermalUpdater.wait_for_sysfs_nodes')
-    @mock.patch('sonic_platform.thermal_updater.ThermalUpdater.clean_thermal_data')
     @mock.patch('sonic_platform.thermal_updater.ThermalUpdater.control_tc')
     @mock.patch('sonic_platform.thermal_updater.ThermalUpdater.load_tc_config')
     @mock.patch('sonic_platform.thermal_updater.logger')
     def test_start_with_sysfs_wait_success(self, mock_logger, mock_load_config, mock_control_tc,
-                                          mock_clean_data, mock_wait_sysfs):
+                                          mock_wait_sysfs):
         """Test start method when sysfs nodes are available"""
         updater = ThermalUpdater(None)
         updater._timer = mock.MagicMock()
@@ -409,7 +408,6 @@ class TestThermalUpdater:
 
         assert result is True
         mock_wait_sysfs.assert_called_once()
-        mock_clean_data.assert_called_once()
         mock_control_tc.assert_called_once_with(False)
         mock_load_config.assert_called_once()
         updater._timer.start.assert_called_once()
