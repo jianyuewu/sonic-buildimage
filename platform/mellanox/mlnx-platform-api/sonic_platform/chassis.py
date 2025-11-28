@@ -699,8 +699,44 @@ class Chassis(ChassisBase):
     # THERMAL methods
     ##############################################
 
+    def _wait_for_sysfs_labels_ready(self, timeout=30):
+        """
+        Wait for sysfs labels ready file to exist and contain non-zero value before initializing thermals.
+        
+        Args:
+            timeout (int): Maximum time to wait in seconds. Default is 30 seconds.
+            
+        Returns:
+            bool: True if file exists and contains non-zero value, False if timeout occurred
+        """
+        sysfs_labels_rdy_file = '/var/run/hw-management/sysfs_labels_rdy'
+        start_time = time.time()
+        
+        while True:
+            if time.time() - start_time > timeout:
+                logger.log_warning('Timeout waiting for {} to be ready after {} seconds, proceeding anyway'.format(
+                    sysfs_labels_rdy_file, timeout))
+                return False
+            
+            # Check if file exists and read its value
+            if os.path.exists(sysfs_labels_rdy_file):
+                try:
+                    with open(sysfs_labels_rdy_file, 'r') as f:
+                        value = f.read().strip()
+                        if value and int(value) != 0:
+                            logger.log_info('sysfs labels ready file {} exists with value {}'.format(
+                                sysfs_labels_rdy_file, value))
+                            return True
+                except (IOError, OSError, ValueError) as e:
+                    logger.log_debug('Failed to read {}: {}'.format(sysfs_labels_rdy_file, str(e)))
+            
+            time.sleep(1)  # Check every second
+
     def initialize_thermals(self):
         if not self._thermal_list:
+            # Wait for sysfs labels ready before initializing thermals
+            self._wait_for_sysfs_labels_ready()
+            
             from .thermal import initialize_chassis_thermals
             # Initialize thermals
             self._thermal_list = initialize_chassis_thermals()
