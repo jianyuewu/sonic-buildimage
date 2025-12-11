@@ -883,6 +883,7 @@ class SFP(NvidiaSFPCommon):
             tuple: (manufacturer, part_number) or (None, None) if read fails
         """
         try:
+            display_idx = self.sdk_index + 1
             if self.manufacturer is not None and self.part_number is not None:
                 return self.manufacturer, self.part_number
 
@@ -894,9 +895,9 @@ class SFP(NvidiaSFPCommon):
             try:
                 manufacturer = api.xcvr_eeprom.read(consts.VENDOR_NAME_FIELD)
                 part_number = api.xcvr_eeprom.read(consts.VENDOR_PART_NO_FIELD)
-                logger.log_debug(f"SFP {self.sdk_index} vendor info read: manufacturer='{manufacturer}', part_number='{part_number}'")
+                logger.log_debug(f"SFP {display_idx} vendor info read: manufacturer='{manufacturer}', part_number='{part_number}'")
             except Exception as e:
-                logger.log_debug(f"SFP {self.sdk_index} vendor info read failed: {e}")
+                logger.log_debug(f"SFP {display_idx} vendor info read failed: {e}")
                 manufacturer = None
                 part_number = None
 
@@ -911,7 +912,7 @@ class SFP(NvidiaSFPCommon):
             if self.retry_read_vendor > 0:
                 self.retry_read_vendor -= 1
                 if self.retry_read_vendor == 0:
-                    logger.log_notice(f"SFP {self.sdk_index}: vendor info unavailable after retries")
+                    logger.log_notice(f"SFP {display_idx}: vendor info unavailable after retries")
 
             return None, None
         except Exception:
@@ -936,10 +937,10 @@ class SFP(NvidiaSFPCommon):
                             self.sdk_index + 1,
                             vendor_info
                         )
-                        logger.log_notice(f'Module {self.sdk_index} vendor info updated - '
+                        logger.log_notice(f'Module {self.sdk_index + 1} vendor info updated - '
                                           f'manufacturer: {manufacturer} part_number: {part_number}')
                 except Exception as e:
-                    logger.log_warning(f'Failed to publish vendor info for SFP {self.sdk_index} - {e}')
+                    logger.log_warning(f'Failed to publish vendor info for SFP {self.sdk_index + 1} - {e}')
 
             sw_control = self.is_sw_control()
             if not sw_control:
