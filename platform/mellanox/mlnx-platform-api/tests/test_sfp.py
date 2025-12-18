@@ -578,6 +578,19 @@ class TestSfp:
         sfp.is_sw_control.side_effect = Exception('')
         assert sfp.get_temperature_info() == (False, None, None, None)
 
+    @mock.patch('sonic_platform.hw_management_independent_mode_update.vendor_data_set_module')
+    def test_get_temperature_info_vendor_retry_loop(self, mock_vendor_set):
+        sfp = SFP(0)
+        sfp.reinit_if_sn_changed = mock.MagicMock(return_value=True)
+        sfp.is_sw_control = mock.MagicMock(return_value=False)
+        # First two attempts fail, third succeeds
+        sfp.get_vendor_info = mock.MagicMock(side_effect=[(None, None), (None, None), ('Mellanox', 'PN-9999')])
+
+        sfp.get_temperature_info()
+
+        assert sfp.get_vendor_info.call_count == 3
+        mock_vendor_set.assert_called_once_with(0, sfp.sdk_index + 1, {'manufacturer': 'Mellanox', 'part_number': 'PN-9999'})
+
     def test_reinit_if_sn_changed(self):
         sfp = SFP(0)
         sfp.get_xcvr_api = mock.MagicMock(return_value=None)
@@ -594,12 +607,10 @@ class TestSfp:
         sfp.sn = 'old_sn'
         sfp.manufacturer = 'OldVendor'
         sfp.part_number = 'OldPart'
-        sfp.retry_read_vendor = 0
         sfp._get_serial = mock.MagicMock(return_value='new_sn')
         assert sfp.reinit_if_sn_changed()
         assert sfp.manufacturer is None
         assert sfp.part_number is None
-        assert sfp.retry_read_vendor == 5
 
     @mock.patch('time.sleep', mock.MagicMock())
     def test_get_vendor_info_success_and_cache(self):
