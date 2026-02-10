@@ -15,7 +15,7 @@ use std::ffi::CString;
 use serde::Deserialize;
 
 const UPDATE_INTERVAL: u64 = 120; // 2 minutes
-const INVALID_CONTAINER_NAME: &str = "—-"; // invalid container name returned by docker stats command
+const INVALID_CONTAINER_NAME: &str = "--"; // invalid container name returned by docker stats command
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -106,7 +106,7 @@ fn parse_docker_json_output(json_output: &str) -> HashMap<String, HashMap<String
 
         if stats.name.is_empty() || stats.name == INVALID_CONTAINER_NAME {
             // If a container stops suddenly after we send the docker stats command,
-            // it might return with a container name "—-". We should ignore such output.
+            // it might return with a container name "--". We should ignore such output.
             warn!("Skipping docker stats JSON for container {} with output: {}", stats.id, line);
             continue;
         }
