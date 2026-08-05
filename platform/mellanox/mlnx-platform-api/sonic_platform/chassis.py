@@ -1496,6 +1496,17 @@ class Chassis(ChassisBase):
     # LiquidCooling methods
     ##############################################
 
+    def is_liquid_cooled(self):
+        """
+        Gets back if the device is Liquid cooled or not
+
+        Returns:
+            A bool value, should return False by default.
+            Air cooled devices return back False
+            Liquid cooled devices return back True
+        """
+        return self.get_liquid_cooling().get_num_leak_sensors() > 0
+
     def initialize_liquid_cooling(self):
         if not self.liquid_cooling:
             from .liquid_cooling import LiquidCooling
