@@ -124,14 +124,12 @@ class WaitSfpReadyTask(threading.Thread):
         is_empty = True
         while self.running:
             if is_empty:
-                logger.log_debug(f'WaitSfpReadyTask is waiting for task...')
                 # If wait_dict is empty, hold the thread until an item coming
                 self.event.wait()
                 self.event.clear()
 
             now = time.monotonic()
             with self.lock:
-                logger.log_debug(f'Processing wait SFP dict: {self._wait_dict}, now={now}')
                 for sfp_index, expire_time in self._wait_dict.items():
                     # If now time is greater than the expire time, remove
                     # the item from wait_dict
