@@ -224,6 +224,9 @@ DEVICE_DATA = {
                 "fan_amb": False,
                 "comex_amb": False,
             }
+        },
+        'sfp': {
+            'fw_control_ports': [64] # 0 based sfp index list
         }
     },
     'x86_64-nvidia_sn6810_ld_simx-r0': {
@@ -233,6 +236,9 @@ DEVICE_DATA = {
                 "fan_amb": False,
                 "comex_amb": False,
             }
+        },
+        'sfp': {
+            'fw_control_ports': [64] # 0 based sfp index list
         }
     }
 }
