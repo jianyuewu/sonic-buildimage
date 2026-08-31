@@ -29,7 +29,7 @@ test_path = os.path.dirname(os.path.abspath(__file__))
 modules_path = os.path.dirname(test_path)
 sys.path.insert(0, modules_path)
 
-from sonic_platform.sfp import SFP, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED
+from sonic_platform.sfp import SFP, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED, STATE_SW_CONTROL, STATE_NOT_PRESENT, SFP_STATUS_INSERTED, SFP_STATUS_REMOVED
 from sonic_platform.chassis import Chassis
 
 
@@ -60,6 +60,8 @@ class TestSfp:
     @mock.patch('sonic_platform.sfp.SFP._get_module_info')
     @mock.patch('sonic_platform.chassis.Chassis.get_num_sfps', mock.MagicMock(return_value=2))
     @mock.patch('sonic_platform.chassis.extract_RJ45_ports_index', mock.MagicMock(return_value=[]))
+    @mock.patch('sonic_platform.chassis.build_cpo_port_map', mock.MagicMock(return_value=None))
+    @mock.patch('sonic_platform.chassis.build_sfp_port_map', mock.MagicMock(return_value=None))
     @mock.patch('sonic_platform.sfp.SFP.get_xcvr_api', mock.MagicMock(return_value=None))
     def test_sfp_get_error_status(self, mock_get_error_code, mock_control):
         sfp = SFP(1)
@@ -94,7 +96,7 @@ class TestSfp:
         mock_control.side_effect = RuntimeError('')
         description = sfp.get_error_description()
         assert description == 'Initializing'
-        
+
         mock_control.side_effect = NotImplementedError('')
         description = sfp.get_error_description()
         assert description == 'Not supported'
@@ -312,7 +314,7 @@ class TestSfp:
         assert not sfp.get_presence()
 
         # CPO ports use the common presence and EEPROM readiness logic
-        cpo = CpoPort(0, asic_id='asic0')
+        cpo = CpoPort(0, 0, 0, 0, asic_id='asic0')
         mock_read.reset_mock()
         mock_exists.return_value = True
         mock_read_int.side_effect = [1, 0]
@@ -418,17 +420,55 @@ class TestSfp:
         assert sfp.get_transceiver_threshold_info()
         sfp.reinit()
 
-    @mock.patch('sonic_platform.sfp.CpoPort.read_eeprom')
-    def test_cpo_get_xcvr_api(self, mock_read):
-        sfp = CpoPort(0)
-        api = sfp.get_xcvr_api()
-        assert isinstance(api, cmis_api.CmisApi)
+    def test_cpo_get_sdk_index(self):
+        sfp = CpoPort(8, 2, 3, 1)
+        assert sfp.get_sdk_index() == 3
+        assert sfp.index == 9
+        assert sfp.oe_id == 3
+        assert sfp.els_id == 1
+        assert sfp.bank_id == 2
 
-    @mock.patch('sonic_platform.sfp.SfpOptoeBase.get_transceiver_info', return_value={})
-    def test_cpo_get_transceiver_info(self, mock_get_info):
-        sfp = CpoPort(0)
-        info = sfp.get_transceiver_info()
-        assert info['type'] == CPO_TYPE
+    def test_cpo_refresh_xcvr_api(self):
+        sfp = CpoPort(0, 1, 0, 0)
+        mock_api = mock.MagicMock()
+        sfp._xcvr_api_factory = mock.MagicMock()
+        sfp._xcvr_api_factory.create_xcvr_api.return_value = mock_api
+        sfp.refresh_xcvr_api()
+        sfp._xcvr_api_factory.create_xcvr_api.assert_called_once_with(1)
+        assert sfp.get_xcvr_api() is mock_api
+
+    def test_cpo_get_eeprom_path(self):
+        sfp = CpoPort(0, 2, 5, 0)
+        assert sfp._get_eeprom_path(page_num=0, bank_id=0) == \
+            '/sys/module/sx_core/asic0/module5/bank0/eeprom/pages'
+        assert sfp._get_eeprom_path(page_num=16, bank_id=2) == \
+            '/sys/module/sx_core/asic0/module5/bank2/eeprom/pages'
+
+    def test_cpo_fill_change_event(self):
+        sfp = CpoPort(0, 0, 0, 0)
+        sfp.state = STATE_SW_CONTROL
+        port_dict = {}
+        sfp.fill_change_event(port_dict)
+        assert port_dict == {
+            1: SFP_STATUS_INSERTED,
+            2: SFP_STATUS_INSERTED,
+            3: SFP_STATUS_INSERTED,
+            4: SFP_STATUS_INSERTED,
+        }
+
+        sfp.state = STATE_NOT_PRESENT
+        port_dict = {}
+        sfp.fill_change_event(port_dict)
+        assert port_dict == {
+            1: SFP_STATUS_REMOVED,
+            2: SFP_STATUS_REMOVED,
+            3: SFP_STATUS_REMOVED,
+            4: SFP_STATUS_REMOVED,
+        }
+
+    def test_cpo_sfp_type(self):
+        sfp = CpoPort(0, 0, 0, 0)
+        assert sfp.sfp_type == CPO_TYPE
 
     @mock.patch('os.path.exists')
     @mock.patch('sonic_platform.utils.read_int_from_file')
@@ -455,12 +495,12 @@ class TestSfp:
         mock_mode.return_value = False
         assert not sfp.is_sw_control()
         mock_mode.return_value = True
-        
+
         mock_read.return_value = 0
         assert not sfp.is_sw_control()
         mock_read.return_value = 1
         assert sfp.is_sw_control()
-        
+
     @mock.patch('sonic_platform.device_data.DeviceDataManager.is_module_host_management_mode', mock.MagicMock(return_value=True))
     @mock.patch('sonic_platform.utils.read_int_from_file')
     @mock.patch('sonic_platform.sfp.SFP.is_sw_control', mock.MagicMock(return_value=True))
@@ -468,12 +508,12 @@ class TestSfp:
         sfp = SFP(0)
         sfp.get_xcvr_api = mock.MagicMock(return_value=None)
         assert not sfp.get_lpmode()
-        
+
         mock_api = mock.MagicMock()
         sfp.get_xcvr_api.return_value = mock_api
         mock_api.get_lpmode = mock.MagicMock(return_value=False)
         assert not sfp.get_lpmode()
-        
+
         mock_api.get_lpmode.return_value = True
         assert sfp.get_lpmode()
 
@@ -483,7 +523,7 @@ class TestSfp:
         sfp = SFP(0)
         sfp.get_xcvr_api = mock.MagicMock(return_value=None)
         assert not sfp.set_lpmode(False)
-        
+
         mock_api = mock.MagicMock()
         sfp.get_xcvr_api.return_value = mock_api
         mock_api.get_lpmode = mock.MagicMock(return_value=False)
@@ -494,69 +534,69 @@ class TestSfp:
         sfp = SFP(0)
         sfp.get_xcvr_api = mock.MagicMock(return_value=None)
         assert sfp.determine_control_type() == 0
-        
+
         sfp.get_xcvr_api.return_value = 1 # Just make it not None
         sfp.is_supported_for_software_control = mock.MagicMock(return_value=True)
         assert sfp.determine_control_type() == 1
-        
+
         sfp.is_supported_for_software_control.return_value = False
         assert sfp.determine_control_type() == 0
-        
+
     def test_check_power_capability(self):
         sfp = SFP(0)
         sfp.get_module_max_power = mock.MagicMock(return_value=-1)
         assert not sfp.check_power_capability()
-        
+
         sfp.get_module_max_power.return_value = 48
         sfp.get_power_limit = mock.MagicMock(return_value=48)
         assert sfp.check_power_capability()
-        
+
         sfp.get_power_limit.return_value = 1
         assert not sfp.check_power_capability()
-        
+
     def test_get_module_max_power(self):
         sfp = SFP(0)
         sfp.is_cmis_api = mock.MagicMock(return_value=True)
         sfp.read_eeprom = mock.MagicMock(return_value=bytearray([48]))
         assert sfp.get_module_max_power() == 48
-        
+
         sfp.is_cmis_api.return_value = False
         sfp.is_sff_api = mock.MagicMock(return_value=True)
         sfp.read_eeprom.return_value = bytearray([128])
         assert sfp.get_module_max_power() == 2.5 * 4
-        
+
         sfp.read_eeprom.return_value = bytearray([32])
         assert sfp.get_module_max_power() == 3.2 * 4
-        
+
         # Simulate invalid value
         sfp.read_eeprom.return_value = bytearray([33])
         assert sfp.get_module_max_power() == -1
-        
+
         # Simulate unsupported module type
         sfp.is_sff_api .return_value = False
         assert sfp.get_module_max_power() == -1
-        
+
     def test_update_i2c_frequency(self):
         sfp = SFP(0)
         sfp.get_frequency_support = mock.MagicMock(return_value=False)
         sfp.set_frequency = mock.MagicMock()
         sfp.update_i2c_frequency()
         sfp.set_frequency.assert_not_called()
-        
+
         sfp.get_frequency_support.return_value = True
         sfp.update_i2c_frequency()
         sfp.set_frequency.assert_not_called()
-        
+
         sfp.is_cmis_api = mock.MagicMock(return_value=True)
         sfp.read_eeprom = mock.MagicMock(return_value=bytearray([0]))
         sfp.update_i2c_frequency()
         sfp.set_frequency.assert_called_with(0)
-        
+
         sfp.is_cmis_api.return_value = False
         sfp.is_sff_api = mock.MagicMock(return_value=True)
         sfp.update_i2c_frequency()
         sfp.set_frequency.assert_called_with(0)
-        
+
     def test_disable_tx_for_sff_optics(self):
         sfp = SFP(0)
         mock_api = mock.MagicMock()
@@ -564,12 +604,12 @@ class TestSfp:
         mock_api.tx_disable = mock.MagicMock()
         sfp.disable_tx_for_sff_optics()
         mock_api.tx_disable.assert_not_called()
-        
+
         sfp.is_sff_api = mock.MagicMock(return_value=True)
         mock_api.get_tx_disable_support = mock.MagicMock(return_value=True)
         sfp.disable_tx_for_sff_optics()
         mock_api.tx_disable.assert_called_with(True)
-        
+
     @mock.patch('sonic_platform.utils.read_int_from_file')
     def test_get_error_info_from_sdk_error_type(self, mock_read):
         sfp = SFP(0)
@@ -578,7 +618,7 @@ class TestSfp:
         sfp_state, error_desc = sfp.get_error_info_from_sdk_error_type()
         assert sfp_state == '2'
         assert 'Unknown error' in error_desc
-        
+
         mock_read.return_value = 2
         sfp_state, error_desc = sfp.get_error_info_from_sdk_error_type()
         assert sfp_state == '11'
@@ -597,7 +637,8 @@ class TestSfp:
             assert error_desc == expected_desc
 
     @mock.patch('sonic_platform.chassis.extract_RJ45_ports_index', mock.MagicMock(return_value=[]))
-    @mock.patch('sonic_platform.chassis.extract_cpo_ports_index', mock.MagicMock(return_value=[]))
+    @mock.patch('sonic_platform.chassis.build_cpo_port_map', mock.MagicMock(return_value=None))
+    @mock.patch('sonic_platform.chassis.build_sfp_port_map', mock.MagicMock(return_value=None))
     @mock.patch('sonic_platform.device_data.DeviceDataManager.get_sfp_count', mock.MagicMock(return_value=1))
     def test_initialize_sfp_modules(self):
         # Create a mock wait_ready_task to avoid starting a real thread
@@ -665,7 +706,7 @@ class TestSfp:
     ])
     def test_get_temperature_from_db(self, data_from_db, expected):
         sfp = SFP(0)
-        
+
         sfp._get_data_from_db = mock.MagicMock(return_value=data_from_db)
         assert sfp.get_temperature_from_db() == expected
 
@@ -679,7 +720,7 @@ class TestSfp:
     ])
     def test_get_warning_threshold_from_db(self, data_from_db, expected):
         sfp = SFP(0)
-        
+
         sfp._get_data_from_db = mock.MagicMock(return_value=data_from_db)
         assert sfp.get_warning_threshold_from_db() == expected
 
@@ -693,7 +734,7 @@ class TestSfp:
     ])
     def test_get_critical_threshold_from_db(self, data_from_db, expected):
         sfp = SFP(0)
-        
+
         sfp._get_data_from_db = mock.MagicMock(return_value=data_from_db)
         assert sfp.get_critical_threshold_from_db() == expected
 
@@ -706,7 +747,7 @@ class TestSfp:
         sfp = SFP(0)
         sfp._get_data_from_db = mock.MagicMock(return_value=data_from_db)
         assert sfp.get_vendor_name_from_db() == expected
-        
+
     @pytest.mark.parametrize("data_from_db, expected", [
         ((False, None), ''),
         ((True, 'Mellanox'), 'Mellanox'),
@@ -748,6 +789,6 @@ class TestSfp:
         app_db.exists = mock.MagicMock(return_value=False)
         mock_db_table_helper.return_value.get_appl_db = mock.MagicMock(return_value=app_db)
         assert not sfp.get_port_config_done('')
-        
+
         app_db.exists.return_value = True
         assert sfp.get_port_config_done('')

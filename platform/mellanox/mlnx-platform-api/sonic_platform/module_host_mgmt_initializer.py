@@ -89,7 +89,7 @@ class ModuleHostMgmtInitializer:
                 if not_initialized:
                     with self.lock:
                         logger.log_notice('Waiting for modules to be ready...')
-                        sfp_count = chassis.get_num_sfps()
+                        sfp_count = chassis.get_module_sysfs_count()
                         if not DeviceDataManager.wait_sysfs_ready(sfp_count):
                             logger.log_error('Modules are not ready')
                         else:
@@ -101,12 +101,14 @@ class ModuleHostMgmtInitializer:
                         chassis.initialize_sfp()
                         asic_ready_list = []
                         sfp_list = []
+                        polling_list = chassis.get_sfp_list_for_polling()
                         for asic_id in not_initialized:
                             asic_id_for_file = asic_id + 1
                             if utils.read_int_from_file(f'/var/run/hw-management/config/asic{asic_id_for_file}_ready') == 1:
                                 asic_ready_list.append(asic_id)
                                 asic_id = f'asic{asic_id}'
-                                sfp_list.extend(chassis._asic_modules_dict[asic_id])
+                                asic_modules = chassis._asic_modules_dict[asic_id]
+                                sfp_list.extend(s for s in polling_list if s in asic_modules)
                         from .sfp import SFP
                         if sfp_list:
                             SFP.initialize_sfp_modules(sfp_list)
