@@ -30,6 +30,7 @@ try:
     import threading
     import time
     import fcntl
+    from collections.abc import Iterator
     from sonic_py_common.logger import Logger
     from sonic_py_common import multi_asic
     from swsscommon.swsscommon import SonicV2Connector, ConfigDBConnector
@@ -38,7 +39,8 @@ try:
     from .device_data import DeviceDataManager
     from .module_host_mgmt_initializer import get_asic_ready_file_path
     from sonic_platform_base.sonic_xcvr.sfp_optoe_base import SfpOptoeBase
-    from sonic_platform_base.sonic_xcvr.fields import consts
+    from sonic_platform_base.sonic_xcvr.cpo.cpo_base import CpoFwOpsEntry
+    from sonic_platform_base.sonic_xcvr.fields import consts, cdb_consts
     from sonic_platform_base.sonic_xcvr.api.public import sff8636, sff8436
 
     from sonic_platform_base.sonic_xcvr.api.public import cmis as cmis_api
@@ -2033,6 +2035,23 @@ class RJ45Port(NvidiaSFPCommon):
         return SFP_STATUS_REMOVED if status == SFP_STATUS_UNKNOWN else status
 
 
+class MockOe:
+    def __init__(self, bank, api):
+        self.bank = bank
+        self.api = api
+
+    def get_api(self):
+        return self.api
+
+
+class MockEls:
+    def __init__(self, api):
+        self.api = api
+        
+    def get_api(self):
+        return self.api
+
+
 class CpoPort(SFP):
     """class derived from SFP, representing CPO ports"""
 
@@ -2195,6 +2214,9 @@ class CpoPort(SFP):
         'els_bias_current_setpoint8': 'mA',
         'els_opt_power_setpoint8': 'dBm',
     }
+    
+    global_cpo_list = None
+    oe_fw_bank = [None, None]
 
     def __init__(self, sfp_index, bank_id, oe_id, els_id, asic_id='asic0'):
         super(CpoPort, self).__init__(sfp_index, asic_id=asic_id)
@@ -2203,6 +2225,20 @@ class CpoPort(SFP):
         self.els_id = els_id
         self._sfp_type_str = None
         self.sfp_type = CPO_TYPE
+        self._oe = None
+        self._els = None
+    
+    @property
+    def oe(self):
+        if self._oe is None:
+            self._oe = MockOe(self.bank_id, self.get_xcvr_api().optical_engine_xcvr_api)
+        return self._oe
+    
+    @property
+    def elsfp(self):
+        if self._els is None:
+            self._els = MockEls(self.get_xcvr_api().external_laser_source_xcvr_api)
+        return self._els
 
     def get_sdk_index(self):
         return self.oe_id
@@ -2273,5 +2309,240 @@ class CpoPort(SFP):
         """
         return self.CPO_DOM_FORMAT_MAP.copy(), self.CPO_DOM_UNIT_MAP.copy()
 
+    def _get_fw_component_api(self, fw_op_entry: CpoFwOpsEntry):
+        if fw_op_entry.component_class == 'OpticalEngine':
+            cpo = self.resolve_oe_fw_ops_target()
+            cpo.set_cdb_target(0)
+            return cpo.get_xcvr_api().optical_engine_xcvr_api
+        if fw_op_entry.component_class == 'ExternalLaserSource':
+            self.set_cdb_target(1)
+            return self.get_xcvr_api().external_laser_source_xcvr_api
+        return None
 
+    def resolve_oe_fw_ops_target(self):
+        vmod_index = self.get_sdk_index()
+        if vmod_index % 2 == 0:
+            return self
+        else:
+            for i in range(self.index):
+                index = self.index - i - 1
+                if index < 0:
+                    break
+                cpo = self.global_cpo_list[index]
+                if cpo.get_sdk_index() == vmod_index - 1:
+                    return cpo
+            raise RuntimeError(f"Failed to find sibling for CPO {vmod_index}")
 
+    def detect_duplicate_download_request(self, api, fw_op_entry):
+        image_bank_index = 0
+        if fw_op_entry.component_class == 'OpticalEngine':
+            firmware_info = api.get_module_fw_info()
+            if not firmware_info or firmware_info.get("status") is not True:
+                reason = firmware_info.get("info") if firmware_info else None
+                raise RuntimeError(reason or "failed to get firmware information")
+            firmware_info = firmware_info.get("result")
+            if not firmware_info:
+                raise RuntimeError("failed to get firmware information")
+            inactive_firmware = firmware_info[9]
+            firmare_a = firmware_info[0]
+            
+            if inactive_firmware == firmare_a:
+                image_bank_index = 0
+                if fw_op_entry.file_path == self.oe_fw_bank[0]:
+                    return True, image_bank_index
+            else:
+                image_bank_index = 1
+                if fw_op_entry.file_path == self.oe_fw_bank[1]:
+                    return True, image_bank_index
+        return False, image_bank_index
+    
+    def update_oe_fw_bank(self, image_bank_index, fw_op_entry):
+        if fw_op_entry.component_class == 'OpticalEngine':
+            if image_bank_index == 0:
+                self.oe_fw_bank[0] = fw_op_entry.file_path
+            else:
+                self.oe_fw_bank[1] = fw_op_entry.file_path
+
+    @staticmethod
+    def _report_fw_failure(
+            operation: str,
+            fw_op_entry: CpoFwOpsEntry,
+            reason: str) -> None:
+        """Print and log a CPO firmware operation failure."""
+        message = (
+            f"CPO firmware {operation} failed: "
+            f"module={fw_op_entry.cpo_module_index}, "
+            f"component={fw_op_entry.component_class}, "
+            f"index={fw_op_entry.component_index}: {reason}"
+        )
+        print(message)
+        logger.log_error(message)
+    
+    def download_firmware(
+            self, fw_op_entry: CpoFwOpsEntry) -> Iterator[int]:
+        """
+        Download firmware to a CPO component using the standard CMIS CDB flow.
+
+        Args:
+            fw_op_entry: A CPO firmware operation entry containing the image
+                path selected by the package matching stage.
+
+        Returns:
+            An iterator yielding the number of bytes written for each
+            successfully downloaded block.
+
+        Raises:
+            RuntimeError: If validation or a CMIS CDB operation fails.
+        """
+        if not fw_op_entry.file_path:
+            reason = "firmware image path is missing"
+            self._report_fw_failure(
+                "download", fw_op_entry, reason
+            )
+            raise RuntimeError(reason)
+
+        if not os.path.isfile(fw_op_entry.file_path):
+            reason = (
+                f"firmware image file does not exist: {fw_op_entry.file_path}"
+            )
+            self._report_fw_failure(
+                "download", fw_op_entry, reason
+            )
+            raise RuntimeError(reason)
+
+        api = self._get_fw_component_api(fw_op_entry)
+        if api is None:
+            reason = "unsupported component class"
+            self._report_fw_failure(
+                "download", fw_op_entry, reason
+            )
+            raise RuntimeError(reason)
+
+        detect_duplicate, image_bank_index = self.detect_duplicate_download_request(api, fw_op_entry)
+        if detect_duplicate:
+            return
+
+        fw_features = api.get_module_fw_mgmt_feature()
+        if not fw_features or fw_features.get("status") is not True:
+            info = fw_features.get("info") if fw_features else None
+            reason = info or "failed to get firmware management features"
+            self._report_fw_failure(
+                "download", fw_op_entry, reason
+            )
+            raise RuntimeError(reason)
+
+        feature = fw_features.get("feature")
+        if not isinstance(feature, (list, tuple)) or len(feature) != 5:
+            reason = "invalid firmware management features"
+            self._report_fw_failure(
+                "download", fw_op_entry, reason
+            )
+            raise RuntimeError(reason)
+
+        start_lpl_size, max_block_size, lpl_only, _, _ = feature
+        result, info = api.module_fw_start_download(fw_op_entry.file_path)
+        if result is not True:
+            reason = info or "CDB start download command failed"
+            self._report_fw_failure("download", fw_op_entry, reason)
+            raise RuntimeError(reason)
+
+        block_size = (
+            cdb_consts.LPL_MAX_PAYLOAD_SIZE
+            if lpl_only
+            else max_block_size
+        )
+        with open(fw_op_entry.file_path, "rb") as firmware:
+            firmware.seek(start_lpl_size)
+            address = 0
+            while chunk := firmware.read(block_size):
+                if lpl_only:
+                    status = api.cdb_lpl_block_write(address, chunk)
+                else:
+                    status = api.cdb_epl_block_write(address, chunk)
+                if status != 1:
+                    reason = f"CDB block write failed at offset {address}"
+                    self._report_fw_failure(
+                        "download", fw_op_entry, reason
+                    )
+                    raise RuntimeError(reason)
+                address += len(chunk)
+                yield len(chunk)
+
+        result, info = api.module_fw_complete_download()
+        if result is not True:
+            reason = info or "CDB complete download command failed"
+            self._report_fw_failure("download", fw_op_entry, reason)
+            raise RuntimeError(reason)
+        else:
+            self.update_oe_fw_bank(image_bank_index, fw_op_entry)
+
+    def run_firmware(
+            self, fw_op_entry: CpoFwOpsEntry, mode: int = 0x01) -> bool:
+        """
+        Run staged firmware for a CPO component.
+
+        Args:
+            fw_op_entry: A CPO firmware operation entry.
+            mode: CMIS CDB firmware run mode. Defaults to an attempted hitless
+                reset to the inactive image.
+
+        Returns:
+            True if the operation succeeds, otherwise False.
+        """
+        api = self._get_fw_component_api(fw_op_entry)
+        if api is None:
+            self._report_fw_failure(
+                "run", fw_op_entry, "unsupported component class"
+            )
+            return False
+
+        result, info = api.module_fw_run(mode)
+        if result is not True:
+            self._report_fw_failure(
+                "run", fw_op_entry, info or "CDB run command failed"
+            )
+            return False
+        return True
+
+    def commit_firmware(self, fw_op_entry: CpoFwOpsEntry) -> bool:
+        """
+        Commit running firmware for a CPO component.
+
+        Args:
+            fw_op_entry: A CPO firmware operation entry.
+
+        Returns:
+            True if the operation succeeds, otherwise False.
+        """
+        api = self._get_fw_component_api(fw_op_entry)
+        if api is None:
+            self._report_fw_failure(
+                "commit", fw_op_entry, "unsupported component class"
+            )
+            return False
+
+        result, info = api.module_fw_commit()
+        if result is not True:
+            self._report_fw_failure(
+                "commit", fw_op_entry, info or "CDB commit command failed"
+            )
+            return False
+        return True
+
+    def upgrade_firmware(
+            self, fw_op_entry: CpoFwOpsEntry) -> Iterator[int]:
+        """
+        Download, run, and commit firmware for a CPO component.
+
+        Args:
+            fw_op_entry: A CPO firmware operation entry.
+
+        Returns:
+            An iterator yielding the number of bytes written for each
+            successfully downloaded block.
+        """
+        yield from self.download_firmware(fw_op_entry)
+        if not self.run_firmware(fw_op_entry):
+            raise RuntimeError("firmware run failed")
+        if not self.commit_firmware(fw_op_entry):
+            raise RuntimeError("firmware commit failed")

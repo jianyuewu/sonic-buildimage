@@ -575,6 +575,23 @@ class Chassis(ChassisBase):
         self.sfp_wait_ready_and_initialize()
         return super(Chassis, self).get_sfp(index)
 
+    def get_all_cpos(self):
+        ret = self.get_all_sfps()[:-1]
+        sfp_module = self._import_sfp_module()
+        if sfp_module.CpoPort.global_cpo_list is None:
+            sfp_module.CpoPort.global_cpo_list = ret
+        return ret
+
+    def get_cpo(self, index):
+        ret = self.get_all_sfps()[:-1]
+        sfp_module = self._import_sfp_module()
+        if sfp_module.CpoPort.global_cpo_list is None:
+            sfp_module.CpoPort.global_cpo_list = ret
+        return ret[index - 1]
+
+    def get_num_cpos(self):
+        return self.get_num_sfps() - 1
+
     def get_port_or_cage_type(self, index):
         """
         Retrieves sfp port or cage type corresponding to physical port <index>
