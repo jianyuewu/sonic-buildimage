@@ -255,6 +255,200 @@ class TestDeviceInfo(object):
         result = device_info.get_platform_json_data()
         assert result is None
 
+    @mock.patch("os.path.isfile")
+    @mock.patch("{}.open".format(BUILTINS))
+    @mock.patch("sonic_py_common.device_info.get_path_to_platform_dir")
+    @mock.patch("sonic_py_common.device_info.get_path_to_hwsku_dir")
+    @mock.patch("sonic_py_common.device_info.get_platform")
+    def test_get_cpo_data(self, mock_get_platform, mock_get_hwsku_dir, mock_get_platform_dir, mock_open, mock_isfile):
+        mock_get_platform.return_value = "x86_64-vendor_cpo-r0"
+        mock_get_hwsku_dir.return_value = "/usr/share/sonic/device/x86_64-vendor_cpo-r0/CPO-HWSKU"
+        mock_get_platform_dir.return_value = "/usr/share/sonic/device/x86_64-vendor_cpo-r0"
+
+        cpo_data = {
+            "devices": {
+                "OE1": {
+                    "device_type": "optical_engine",
+                    "max_banks": 2,
+                    "asic_lanes": "41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56",
+                    "i2c_path": "/sys/bus/i2c/devices/32-0050"
+                },
+                "ELS1": {
+                    "device_type": "external_laser_source",
+                    "lasers": 4,
+                    "max_banks": 1,
+                    "laser_to_asic_lane_mapping": {
+                        "1": "41,42,43,44",
+                        "2": "45,46,47,48",
+                        "3": "49,50,51,52",
+                        "4": "53,54,55,56"
+                    },
+                    # example vendor-specific field; must pass through verbatim.
+                    "elsfp_sysfs_path": "/sys/bus/i2c/devices/33-0051"
+                }
+            },
+            "interfaces": {
+                "Ethernet0": {
+                    "associated_devices": [
+                        {"device_id": "OE1", "bank": 0},
+                        {"device_id": "ELS1", "bank": 0}
+                    ]
+                },
+                "Ethernet8": {
+                    "associated_devices": [
+                        {"device_id": "OE1", "bank": 1},
+                        {"device_id": "ELS1", "bank": 0}
+                    ]
+                }
+            }
+        }
+
+        # Happy path: lane strings normalized, vendor field untouched.
+        mock_isfile.return_value = True
+        open_mocked = mock.mock_open(read_data=json.dumps(cpo_data))
+        mock_open.side_effect = open_mocked
+        result = device_info.get_cpo_data()
+        assert result["devices"]["OE1"]["asic_lanes"] == [41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56]
+        assert result["devices"]["ELS1"]["laser_to_asic_lane_mapping"] == {
+            1: [41, 42, 43, 44],
+            2: [45, 46, 47, 48],
+            3: [49, 50, 51, 52],
+            4: [53, 54, 55, 56],
+        }
+        assert result["devices"]["ELS1"]["elsfp_sysfs_path"] == "/sys/bus/i2c/devices/33-0051"
+        assert result["interfaces"]["Ethernet0"]["associated_devices"] == [
+            {"device_id": "OE1", "bank": 0},
+            {"device_id": "ELS1", "bank": 0},
+        ]
+        assert result["interfaces"]["Ethernet8"]["associated_devices"] == [
+            {"device_id": "OE1", "bank": 1},
+            {"device_id": "ELS1", "bank": 0},
+        ]
+
+        # hwsku file takes precedence over the platform file.
+        mock_open.side_effect = mock.mock_open(read_data=json.dumps(cpo_data))
+        device_info.get_cpo_data()
+        opened_path = mock_open.call_args[0][0]
+        assert opened_path == "/usr/share/sonic/device/x86_64-vendor_cpo-r0/CPO-HWSKU/cpo.json"
+
+        # Falls back to the platform file when no hwsku file exists.
+        def only_platform_file(path):
+            return path == "/usr/share/sonic/device/x86_64-vendor_cpo-r0/cpo.json"
+        mock_isfile.side_effect = only_platform_file
+        mock_open.side_effect = mock.mock_open(read_data=json.dumps(cpo_data))
+        device_info.get_cpo_data()
+        opened_path = mock_open.call_args[0][0]
+        assert opened_path == "/usr/share/sonic/device/x86_64-vendor_cpo-r0/cpo.json"
+
+        # Returns None when no file exists in either directory.
+        mock_isfile.side_effect = None
+        mock_isfile.return_value = False
+        assert device_info.get_cpo_data() is None
+
+        # Returns None when platform is not set.
+        mock_isfile.return_value = True
+        mock_open.side_effect = mock.mock_open(read_data=json.dumps(cpo_data))
+        mock_get_platform.return_value = None
+        assert device_info.get_cpo_data() is None
+
+        # Returns None when the JSON is invalid.
+        mock_get_platform.return_value = "x86_64-vendor_cpo-r0"
+        mock_open.side_effect = mock.mock_open(read_data="invalid json")
+        assert device_info.get_cpo_data() is None
+
+    @mock.patch("os.path.isfile")
+    @mock.patch("{}.open".format(BUILTINS))
+    @mock.patch("sonic_py_common.device_info.get_path_to_platform_dir")
+    @mock.patch("sonic_py_common.device_info.get_path_to_hwsku_dir")
+    @mock.patch("sonic_py_common.device_info.get_platform")
+    def test_get_cpo_data_optical_devices_json(self, mock_get_platform, mock_get_hwsku_dir,
+                                               mock_get_platform_dir, mock_open, mock_isfile):
+        """Platforms that ship the file as optical_devices.json, with the
+        'lanes' / 'laser_to_lane_mapping' spelling of the lane fields."""
+        platform_dir = "/usr/share/sonic/device/x86_64-vendor_optical-r0"
+        mock_get_platform.return_value = "x86_64-vendor_optical-r0"
+        mock_get_hwsku_dir.return_value = platform_dir + "/OPTICAL-HWSKU"
+        mock_get_platform_dir.return_value = platform_dir
+
+        optical_data = {
+            "devices": {
+                "OE0": {
+                    "device_type": "optical_engine",
+                    "max_banks": 4,
+                    "lanes": "0,1,2,3",
+                    "i2c_path": ""
+                },
+                "ELS0": {
+                    "device_type": "external_laser_source",
+                    "lasers": 2,
+                    "max_banks": 1,
+                    "laser_to_lane_mapping": {
+                        "1": "0,1",
+                        "2": "2,3"
+                    }
+                }
+            },
+            "sfps": {"0": {"index": 1}},
+            "interfaces": {
+                "Ethernet0": {
+                    "associated_devices": [
+                        {"device_id": "OE0", "bank": 0},
+                        {"device_id": "ELS0", "bank": 0}
+                    ]
+                }
+            }
+        }
+
+        # Only optical_devices.json exists, in the platform directory.
+        def only_optical_devices_file(path):
+            return path == os.path.join(platform_dir, "optical_devices.json")
+
+        mock_isfile.side_effect = only_optical_devices_file
+        mock_open.side_effect = mock.mock_open(read_data=json.dumps(optical_data))
+        result = device_info.get_cpo_data()
+
+        assert mock_open.call_args[0][0] == os.path.join(platform_dir, "optical_devices.json")
+        assert result["devices"]["OE0"]["lanes"] == [0, 1, 2, 3]
+        assert result["devices"]["ELS0"]["laser_to_lane_mapping"] == {
+            1: [0, 1],
+            2: [2, 3],
+        }
+        # unrelated sections pass through verbatim
+        assert result["sfps"] == {"0": {"index": 1}}
+        assert result["interfaces"]["Ethernet0"]["associated_devices"] == [
+            {"device_id": "OE0", "bank": 0},
+            {"device_id": "ELS0", "bank": 0},
+        ]
+
+        # cpo.json wins when both names are present in the same directory.
+        mock_isfile.side_effect = None
+        mock_isfile.return_value = True
+        mock_open.side_effect = mock.mock_open(read_data=json.dumps(optical_data))
+        device_info.get_cpo_data()
+        assert mock_open.call_args[0][0] == os.path.join(
+            platform_dir, "OPTICAL-HWSKU", "cpo.json")
+
+    def test_normalize_cpo_data_variants(self):
+        """Devices with neither lane spelling, and files with no 'devices' key,
+        must be left alone rather than raising."""
+        # no 'devices' key at all (alternative top-level layout)
+        data = {"oes": {"0": {"lanes": "1,2"}}, "interfaces": {}}
+        device_info._normalize_cpo_data(data)
+        assert data == {"oes": {"0": {"lanes": "1,2"}}, "interfaces": {}}
+
+        # device carrying neither lane spelling
+        data = {"devices": {"OE0": {"device_type": "optical_engine"}}}
+        device_info._normalize_cpo_data(data)
+        assert data == {"devices": {"OE0": {"device_type": "optical_engine"}}}
+
+        # unrecognized device_type still raises
+        data = {"devices": {"X0": {"device_type": "mystery"}}}
+        with pytest.raises(ValueError, match="Unrecognized device_type"):
+            device_info._normalize_cpo_data(data)
+
+        # lane string tolerates spaces and a trailing comma
+        assert device_info._parse_lane_string("1, 2,3, ") == [1, 2, 3]
+
     @mock.patch("sonic_py_common.device_info.get_platform_json_data")
     @mock.patch("sonic_py_common.device_info.get_platform")
     def test_is_smartswitch(self, mock_get_platform, mock_get_platform_json_data):

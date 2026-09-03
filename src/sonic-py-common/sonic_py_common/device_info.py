@@ -6,6 +6,7 @@ import random
 import re
 import subprocess
 import yaml
+from typing import List, Optional
 from natsort import natsorted
 from sonic_py_common.general import getstatusoutput_noshell_pipe
 from swsscommon.swsscommon import ConfigDBConnector, SonicV2Connector
@@ -23,6 +24,13 @@ PORT_CONFIG_FILE = "port_config.ini"
 PLATFORM_JSON_FILE = "platform.json"
 OPTICAL_DEVICES_JSON_FILE = "optical_devices.json"
 BMC_DATA_FILE = 'bmc.json'
+
+# CPO configuration file names, in lookup order. Upstream names the file
+# cpo.json; this branch shipped it as optical_devices.json, so both are
+# accepted.
+CPO_FILE = "cpo.json"
+CPO_FILE_NAMES = (CPO_FILE, OPTICAL_DEVICES_JSON_FILE)
+
 BMC_BUILD_CONFIG_FILE = '/etc/sonic/bmc_config.json'
 GLOBAL_BMC_DATA_FILE = '/etc/sonic/bmc.json'
 
@@ -201,6 +209,141 @@ def get_platform_json_data():
     except (json.JSONDecodeError, IOError, TypeError, ValueError):
         # Handle any file reading and JSON parsing errors
         return None
+
+
+def get_cpo_data() -> Optional[dict]:
+    """
+    Retrieve the CPO topology data.
+
+    The file is named cpo.json upstream, but some platforms ship it as
+    optical_devices.json; both names are accepted (see CPO_FILE_NAMES).
+    Locates the file using a two-stage lookup: a hwsku-specific file takes
+    precedence over a platform-wide file. Lane fields are normalized from
+    comma-separated strings ("41,42") into lists of ints ([41, 42]); all
+    other fields, including vendor-specific ones, are returned verbatim.
+    None is returned if the file does not exist or cannot be parsed.
+    """
+    if not get_platform():
+        return None
+
+    cpo_file = _find_cpo_file()
+    if not cpo_file:
+        return None
+
+    try:
+        with open(cpo_file, 'r') as f:
+            cpo_data = json.loads(f.read())
+    except (json.JSONDecodeError, IOError, TypeError, ValueError):
+        # Handle any file reading and JSON parsing errors
+        return None
+
+    _normalize_cpo_data(cpo_data)
+    return cpo_data
+
+
+def _find_cpo_file() -> Optional[str]:
+    """
+    Locate the CPO topology file, preferring the hwsku directory over the
+    platform directory. Within each directory the accepted file names are
+    tried in CPO_FILE_NAMES order (cpo.json, then optical_devices.json).
+    Returns the path to the first file found, or None.
+    """
+    try:
+        hwsku_dir = get_path_to_hwsku_dir()
+    except (OSError, TypeError):
+        hwsku_dir = None
+
+    try:
+        platform_dir = get_path_to_platform_dir()
+    except OSError:
+        platform_dir = None
+
+    for directory in (hwsku_dir, platform_dir):
+        if not directory:
+            continue
+        for file_name in CPO_FILE_NAMES:
+            candidate = os.path.join(directory, file_name)
+            if os.path.isfile(candidate):
+                return candidate
+
+    return None
+
+
+def _parse_lane_string(lane_string: str) -> List[int]:
+    """'41,42,43' -> [41, 42, 43]; tolerates spaces and a trailing comma."""
+    return [int(tok) for tok in lane_string.split(',') if tok.strip() != '']
+
+
+def _normalize_cpo_data(cpo_data: dict) -> None:
+    """
+    In-place normalization of the known lane fields from comma-separated
+    strings to lists of ints. All other fields (vendor-specific included) are
+    left untouched.
+
+    Two spellings of each lane field are recognized, because platforms differ:
+    an optical engine carries 'asic_lanes' or 'lanes', and an external laser
+    source carries 'laser_to_asic_lane_mapping' or 'laser_to_lane_mapping'.
+    Whichever is present is normalized; a device carrying neither is left
+    alone. A file with no 'devices' key at all (some platforms use a different
+    top-level layout) is returned verbatim.
+
+    Example input:
+        {
+            "devices": {
+                "OE1": {
+                    "device_type": "optical_engine",
+                    "asic_lanes": "41,42,43,44",
+                    "i2c_path": "/sys/bus/i2c/devices/32-0050"
+                },
+                "ELS1": {
+                    "device_type": "external_laser_source",
+                    "laser_to_asic_lane_mapping": {
+                        "1": "41,42",
+                        "2": "43,44"
+                    }
+                }
+            }
+        }
+
+    After _normalize_cpo_data(...) the same dict becomes:
+        {
+            "devices": {
+                "OE1": {
+                    "device_type": "optical_engine",
+                    "asic_lanes": [41, 42, 43, 44],
+                    "i2c_path": "/sys/bus/i2c/devices/32-0050"
+                },
+                "ELS1": {
+                    "device_type": "external_laser_source",
+                    "laser_to_asic_lane_mapping": {
+                        1: [41, 42],
+                        2: [43, 44]
+                    }
+                }
+            }
+        }
+    """
+    for device in cpo_data.get('devices', {}).values():
+        device_type = device['device_type']
+        if device_type == 'optical_engine':
+            # Upstream cpo.json names this 'asic_lanes'; the optical_devices.json
+            # shipped on this branch names it 'lanes'. Normalize whichever is
+            # present and leave the field absent if neither is.
+            for field in ('asic_lanes', 'lanes'):
+                if field in device:
+                    device[field] = _parse_lane_string(device[field])
+        elif device_type == 'external_laser_source':
+            # Likewise 'laser_to_asic_lane_mapping' vs 'laser_to_lane_mapping'.
+            for field in (
+                'laser_to_asic_lane_mapping', 'laser_to_lane_mapping'
+            ):
+                if field in device:
+                    device[field] = {
+                        int(laser): _parse_lane_string(lanes)
+                        for laser, lanes in device[field].items()
+                    }
+        else:
+            raise ValueError(f'Unrecognized device_type: {device_type}')
 
 
 def get_asic_conf_file_path():
