@@ -38,6 +38,7 @@ try:
     from .device_data import DeviceDataManager
     from .module_host_mgmt_initializer import get_asic_ready_file_path
     from sonic_platform_base.sonic_xcvr.sfp_optoe_base import SfpOptoeBase
+    from sonic_platform_base.sonic_xcvr.cpo.cpo_base import CpoBase
     from sonic_platform_base.sonic_xcvr.fields import consts
     from sonic_platform_base.sonic_xcvr.api.public import sff8636, sff8436
 
@@ -2007,6 +2008,30 @@ class RJ45Port(NvidiaSFPCommon):
 class CpoPort(SFP):
     """class derived from SFP, representing CPO ports"""
 
+    SFP_MLNX_ERROR_DESCRIPTION_BOOT_ERROR = 'Module boot failed'
+    SFP_MLNX_ERROR_DESCRIPTION_RECOVERY_ERROR = 'Module entered firmware recovery mode'
+    SFP_MLNX_ERROR_DESCRIPTION_SUBMODULE_FAILURE = 'Internal submodule failure detected'
+    SFP_MLNX_ERROR_DESCRIPTION_ELS_CRITICAL_INDICATION = 'Critical ELS fault detected'
+
+    SFP_MLNX_ERROR_BIT_BOOT_ERROR = 0x00100000
+    SFP_MLNX_ERROR_BIT_RECOVERY_ERROR = 0x00200000
+    SFP_MLNX_ERROR_BIT_SUBMODULE_FAILURE = 0x00400000
+    SFP_MLNX_ERROR_BIT_ELS_CRITICAL_INDICATION = 0x00800000
+
+    CPO_SDK_ERRORS_TO_DESCRIPTION = {
+        0xf: SFP_MLNX_ERROR_DESCRIPTION_BOOT_ERROR,
+        0x10: SFP_MLNX_ERROR_DESCRIPTION_RECOVERY_ERROR,
+        0x11: SFP_MLNX_ERROR_DESCRIPTION_SUBMODULE_FAILURE,
+        0x13: SFP_MLNX_ERROR_DESCRIPTION_ELS_CRITICAL_INDICATION,
+    }
+
+    CPO_SDK_ERRORS_TO_ERROR_BITS = {
+        0xf: SFP_MLNX_ERROR_BIT_BOOT_ERROR,
+        0x10: SFP_MLNX_ERROR_BIT_RECOVERY_ERROR,
+        0x11: SFP_MLNX_ERROR_BIT_SUBMODULE_FAILURE,
+        0x13: SFP_MLNX_ERROR_BIT_ELS_CRITICAL_INDICATION,
+    }
+
     def __init__(self, sfp_index, asic_id='asic0'):
         super(CpoPort, self).__init__(sfp_index, asic_id=asic_id)
         self._sfp_type_str = None
@@ -2023,6 +2048,69 @@ class CpoPort(SFP):
         if self._xcvr_api is None:
             self._xcvr_api = self._xcvr_api_factory._create_api(cmis_codes.CmisCodes, cmis_mem.CmisMemMap, cmis_api.CmisApi)
         return self._xcvr_api
+
+    @classmethod
+    def _get_error_description_dict(cls):
+        error_description_dict = super()._get_error_description_dict()
+        error_description_dict.update({
+            15: cls.SFP_MLNX_ERROR_DESCRIPTION_BOOT_ERROR,
+            16: cls.SFP_MLNX_ERROR_DESCRIPTION_RECOVERY_ERROR,
+            17: cls.SFP_MLNX_ERROR_DESCRIPTION_SUBMODULE_FAILURE,
+            19: cls.SFP_MLNX_ERROR_DESCRIPTION_ELS_CRITICAL_INDICATION,
+        })
+        return error_description_dict
+
+    def get_error_description(self):
+        try:
+            sw_control = self.is_sw_control()
+        except NotImplementedError:
+            return 'Not supported'
+        except Exception:
+            sw_control = False
+
+        if sw_control:
+            return CpoBase.get_error_description(self)
+
+        return self._get_fw_control_error_description()
+
+    def _get_fw_control_error_description(self):
+        oper_status, error_code = self._get_module_info(self.sdk_index)
+        oper_status_to_description = {
+            SX_PORT_MODULE_STATUS_INITIALIZING: self.SFP_STATUS_INITIALIZING,
+            SX_PORT_MODULE_STATUS_PLUGGED: self.SFP_STATUS_OK,
+            SX_PORT_MODULE_STATUS_UNPLUGGED: self.SFP_STATUS_UNPLUGGED,
+            SX_PORT_MODULE_STATUS_PLUGGED_DISABLED: self.SFP_STATUS_DISABLED,
+        }
+
+        if oper_status in oper_status_to_description:
+            return oper_status_to_description[oper_status]
+
+        if oper_status == SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR:
+            error_description_dict = self._get_error_description_dict()
+            return error_description_dict.get(error_code, "Unknown error ({})".format(error_code))
+
+        return "Unknown SFP module status ({})".format(oper_status)
+
+    def get_error_info_from_sdk_error_type(self):
+        error_type = utils.read_int_from_file(f'/sys/module/sx_core/asic0/module{self.sdk_index}/statuserror', default=-1)
+
+        error_to_bits = dict(NvidiaSFPCommon.SDK_ERRORS_TO_ERROR_BITS)
+        error_to_bits.update(self.CPO_SDK_ERRORS_TO_ERROR_BITS)
+        sfp_state_bits = error_to_bits.get(error_type)
+        if sfp_state_bits is None:
+            logger.log_error(f"Unrecognized error {error_type} detected on CPO {self.sdk_index}")
+            return SFP_STATUS_ERROR, "Unknown error ({})".format(error_type)
+
+        if error_type in SDK_SFP_BLOCKING_ERRORS:
+            sfp_state_bits |= SfpOptoeBase.SFP_ERROR_BIT_BLOCKING
+
+        sfp_state_bits |= SfpOptoeBase.SFP_STATUS_BIT_INSERTED
+
+        error_to_description = dict(NvidiaSFPCommon.SDK_ERRORS_TO_DESCRIPTION)
+        error_to_description.update(self.CPO_SDK_ERRORS_TO_DESCRIPTION)
+        error_description = error_to_description.get(error_type)
+        sfp_state = str(sfp_state_bits)
+        return sfp_state, error_description
 
     def reinit(self):
         """

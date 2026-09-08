@@ -593,6 +593,100 @@ class TestSfp:
         assert sfp_state == '11'
         assert error_desc is None
 
+    @pytest.mark.parametrize("error_code,expected_state,expected_desc", [
+        (15, str(0x100001), 'Module boot failed'),
+        (16, str(0x200001), 'Module entered firmware recovery mode'),
+        (17, str(0x400001), 'Internal submodule failure detected'),
+        (19, str(0x800001), 'Critical ELS fault detected'),
+    ])
+    @mock.patch('sonic_platform.utils.read_int_from_file')
+    def test_cpo_get_error_info_from_sdk_error_type_new_pmpe_codes(
+            self, mock_read, error_code, expected_state, expected_desc):
+        cpo = CpoPort(0)
+        mock_read.return_value = error_code
+        sfp_state, error_desc = cpo.get_error_info_from_sdk_error_type()
+        assert sfp_state == expected_state
+        assert error_desc == expected_desc
+
+    def test_sfp_error_description_dict_excludes_cpo_codes(self):
+        sfp = SFP(0)
+        error_description_dict = sfp._get_error_description_dict()
+        cpo_only_codes = {15, 16, 17, 19}
+        assert cpo_only_codes.isdisjoint(error_description_dict.keys())
+
+    def test_cpo_error_description_dict_includes_cpo_codes(self):
+        cpo = CpoPort(0)
+        error_description_dict = cpo._get_error_description_dict()
+        assert error_description_dict[15] == 'Module boot failed'
+        assert error_description_dict[16] == 'Module entered firmware recovery mode'
+        assert error_description_dict[17] == 'Internal submodule failure detected'
+        assert error_description_dict[19] == 'Critical ELS fault detected'
+        assert 0 in error_description_dict
+        assert 12 in error_description_dict
+
+    @mock.patch('sonic_platform.sfp.NvidiaSFPCommon._get_module_info')
+    @mock.patch('sonic_platform.sfp.CpoPort.is_sw_control')
+    def test_cpo_get_error_description_fw_control(self, mock_sw_control, mock_get_module_info):
+        cpo = CpoPort(0)
+        mock_sw_control.return_value = False
+
+        normal_cases = [
+            (SX_PORT_MODULE_STATUS_INITIALIZING, 'Initializing'),
+            (SX_PORT_MODULE_STATUS_PLUGGED, 'OK'),
+            (SX_PORT_MODULE_STATUS_UNPLUGGED, 'Unplugged'),
+            (SX_PORT_MODULE_STATUS_PLUGGED_DISABLED, 'Disabled'),
+        ]
+        for oper_status, expected in normal_cases:
+            mock_get_module_info.return_value = (oper_status, 0)
+            assert cpo.get_error_description() == expected
+
+        cpo_error_cases = [
+            (15, 'Module boot failed'),
+            (16, 'Module entered firmware recovery mode'),
+            (17, 'Internal submodule failure detected'),
+            (19, 'Critical ELS fault detected'),
+        ]
+        for error_code, expected_desc in cpo_error_cases:
+            mock_get_module_info.return_value = (SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, error_code)
+            assert cpo.get_error_description() == expected_desc
+
+        mock_get_module_info.return_value = (SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, 0)
+        assert cpo.get_error_description() == 'Power budget exceeded'
+
+        mock_get_module_info.return_value = (SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, -1)
+        assert cpo.get_error_description() == 'Unknown error (-1)'
+
+        mock_get_module_info.return_value = (99, 0)
+        assert cpo.get_error_description() == 'Unknown SFP module status (99)'
+
+    @mock.patch('sonic_platform.sfp.CpoPort.is_sw_control')
+    def test_cpo_get_error_description_sw_control(self, mock_sw_control):
+        cpo = CpoPort(0)
+        mock_sw_control.return_value = True
+
+        mock_api = mock.MagicMock()
+        mock_api.get_error_description.return_value = 'No error'
+        with mock.patch.object(cpo, 'get_xcvr_api', return_value=mock_api):
+            assert cpo.get_error_description() == 'No error'
+
+        with mock.patch.object(cpo, 'get_xcvr_api', return_value=None):
+            assert cpo.get_error_description() is None
+
+    @mock.patch('sonic_platform.sfp.CpoPort.is_sw_control')
+    def test_cpo_get_error_description_no_control_sysfs(self, mock_sw_control):
+        cpo = CpoPort(0)
+        mock_sw_control.side_effect = RuntimeError('control sysfs not found')
+
+        with mock.patch('sonic_platform.sfp.NvidiaSFPCommon._get_module_info',
+                        return_value=(SX_PORT_MODULE_STATUS_PLUGGED, 0)):
+            assert cpo.get_error_description() == 'OK'
+
+    @mock.patch('sonic_platform.sfp.CpoPort.is_sw_control')
+    def test_cpo_get_error_description_not_implemented(self, mock_sw_control):
+        cpo = CpoPort(0)
+        mock_sw_control.side_effect = NotImplementedError
+        assert cpo.get_error_description() == 'Not supported'
+
     @mock.patch('sonic_platform.chassis.extract_RJ45_ports_index', mock.MagicMock(return_value=[]))
     @mock.patch('sonic_platform.chassis.extract_cpo_ports_index', mock.MagicMock(return_value=[]))
     @mock.patch('sonic_platform.device_data.DeviceDataManager.get_sfp_count', mock.MagicMock(return_value=1))
