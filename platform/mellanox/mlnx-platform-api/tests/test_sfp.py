@@ -29,7 +29,7 @@ test_path = os.path.dirname(os.path.abspath(__file__))
 modules_path = os.path.dirname(test_path)
 sys.path.insert(0, modules_path)
 
-from sonic_platform.sfp import SFP, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED, STATE_SW_CONTROL, STATE_NOT_PRESENT, SFP_STATUS_INSERTED, SFP_STATUS_REMOVED
+from sonic_platform.sfp import SFP, RJ45Port, CpoPort, CPO_TYPE, cmis_api, SFP_FW_CONTROL, SFP_SW_CONTROL, EVENT_PRESENT, EVENT_NOT_PRESENT, SX_PORT_MODULE_STATUS_INITIALIZING, SX_PORT_MODULE_STATUS_PLUGGED, SX_PORT_MODULE_STATUS_UNPLUGGED, SX_PORT_MODULE_STATUS_PLUGGED_WITH_ERROR, SX_PORT_MODULE_STATUS_PLUGGED_DISABLED, STATE_SW_CONTROL, STATE_NOT_PRESENT, SFP_STATUS_INSERTED, SFP_STATUS_REMOVED
 from sonic_platform.chassis import Chassis
 
 
@@ -661,6 +661,44 @@ class TestSfp:
             assert s.in_stable_state()
             # Verify the mock task was used correctly
             mock_wait_task.start_once.assert_called_once()
+
+    @mock.patch('sonic_platform.utils.read_int_from_file')
+    def test_action_fcp_on_start(self, mock_read_int):
+        sfp = mock.MagicMock()
+        sfp.get_sdk_index.return_value = 64
+
+        # Module is already under firmware control, presence comes from "present"
+        sfp.get_control_type.return_value = SFP_FW_CONTROL
+        mock_read_int.return_value = 1
+        SFP.action_fcp_on_start(sfp)
+        assert mock_read_int.call_args[0][0] == '/sys/module/sx_core/asic0/module64/present'
+        sfp.set_control_type.assert_not_called()
+        sfp.on_event.assert_called_once_with(EVENT_PRESENT)
+
+        sfp.reset_mock()
+        sfp.get_control_type.return_value = SFP_FW_CONTROL
+        mock_read_int.return_value = 0
+        SFP.action_fcp_on_start(sfp)
+        sfp.set_control_type.assert_not_called()
+        sfp.on_event.assert_called_once_with(EVENT_NOT_PRESENT)
+
+        # Module was switched to software control below SONiC, presence comes from
+        # "hw_present" and firmware control must be restored before reporting presence
+        sfp.reset_mock()
+        sfp.get_control_type.return_value = SFP_SW_CONTROL
+        mock_read_int.return_value = 1
+        SFP.action_fcp_on_start(sfp)
+        assert mock_read_int.call_args[0][0] == '/sys/module/sx_core/asic0/module64/hw_present'
+        sfp.set_control_type.assert_called_once_with(SFP_FW_CONTROL)
+        sfp.on_event.assert_called_once_with(EVENT_PRESENT)
+
+        # Nothing to restore while the cage is empty
+        sfp.reset_mock()
+        sfp.get_control_type.return_value = SFP_SW_CONTROL
+        mock_read_int.return_value = 0
+        SFP.action_fcp_on_start(sfp)
+        sfp.set_control_type.assert_not_called()
+        sfp.on_event.assert_called_once_with(EVENT_NOT_PRESENT)
 
     @mock.patch('sonic_platform.sfp.SFP.is_sw_control', mock.MagicMock(return_value=False))
     @mock.patch('sonic_platform.utils.read_int_from_file')
